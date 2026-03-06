@@ -1,0 +1,13 @@
+# Build files
+build/
+*.geode
+
+# IDE
+.vscode/
+.idea/
+*.sln
+*.vcxproj*
+
+# OS
+Thumbs.db
+.DS_Store
