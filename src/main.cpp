@@ -76,6 +76,7 @@ public:
   bool m_remoteP2Jump = false;
   bool m_remoteP2Release = false;
   bool m_remoteDeath = false;
+  bool m_applyingRemote = false; // flag: bypass input block for remote inputs
 
   // Position sync (main thread only)
   float m_remoteX = 0.f;
@@ -797,31 +798,30 @@ class $modify(SwapPlayLayer, PlayLayer) {
     }
 
     // ══════════════════════════════════════
-    // SPECTATING: apply remote jump inputs
-    // Cube plays normally — same jumps as active player
+    // SPECTATING: apply remote inputs via handleButton
+    // Uses m_applyingRemote flag to bypass the input block
     // ══════════════════════════════════════
     if (!net->isActivePlayer()) {
-      if (this->m_player1) {
-        if (net->m_remoteJump) {
-          this->m_player1->pushButton(PlayerButton::Jump);
-          net->m_remoteJump = false;
-        }
-        if (net->m_remoteRelease) {
-          this->m_player1->releaseButton(PlayerButton::Jump);
-          net->m_remoteRelease = false;
-        }
+      net->m_applyingRemote = true;
+      if (net->m_remoteJump) {
+        GJBaseGameLayer::handleButton(true, 1, true);
+        net->m_remoteJump = false;
       }
-      if (this->m_player2) {
-        if (net->m_remoteP2Jump) {
-          this->m_player2->pushButton(PlayerButton::Jump);
-          net->m_remoteP2Jump = false;
-        }
-        if (net->m_remoteP2Release) {
-          this->m_player2->releaseButton(PlayerButton::Jump);
-          net->m_remoteP2Release = false;
-        }
+      if (net->m_remoteRelease) {
+        GJBaseGameLayer::handleButton(false, 1, true);
+        net->m_remoteRelease = false;
       }
-      // If active player died → reset us too
+      if (net->m_remoteP2Jump) {
+        GJBaseGameLayer::handleButton(true, 1, false);
+        net->m_remoteP2Jump = false;
+      }
+      if (net->m_remoteP2Release) {
+        GJBaseGameLayer::handleButton(false, 1, false);
+        net->m_remoteP2Release = false;
+      }
+      net->m_applyingRemote = false;
+
+      // If active player died → we die too
       if (net->m_remoteDeath) {
         net->m_remoteDeath = false;
         this->resetLevel();
@@ -863,6 +863,14 @@ class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
       GJBaseGameLayer::handleButton(push, button, player1);
       return;
     }
+
+    // Remote inputs bypass the block (set by postUpdate)
+    if (net->m_applyingRemote) {
+      GJBaseGameLayer::handleButton(push, button, player1);
+      return;
+    }
+
+    // Active player: allow + send to peer
     if (net->isActivePlayer()) {
       GJBaseGameLayer::handleButton(push, button, player1);
       if (player1) {
@@ -871,5 +879,6 @@ class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
         push ? net->sendP2Jump() : net->sendP2Release();
       }
     }
+    // Inactive without remote flag → block
   }
 };
