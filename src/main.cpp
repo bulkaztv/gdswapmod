@@ -12,7 +12,7 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
-#include <Geode/ui/Popup.hpp>
+
 
 using namespace geode::prelude;
 
@@ -326,46 +326,69 @@ private:
 // Swap Connect Popup (Host / Join UI)
 // ─────────────────────────────────────────
 
-class SwapConnectPopup : public geode::Popup<> {
+class SwapConnectPopup : public FLAlertLayer {
 protected:
   CCTextInputNode *m_ipInput = nullptr;
   CCLabelBMFont *m_statusLabel = nullptr;
 
-  bool setup() override {
-    this->setTitle("GD Swap Mode");
+  bool init() {
+    if (!FLAlertLayer::init(75))
+      return false;
 
-    auto winSize = this->m_mainLayer->getContentSize();
+    auto winSize = CCDirector::sharedDirector()->getWinSize();
+
+    // Dark background
+    m_noElasticity = true;
+    auto bg = CCScale9Sprite::create("GJ_square01.png", {0, 0, 80, 80});
+    bg->setContentSize({300.f, 200.f});
+    bg->setPosition(winSize / 2);
+    m_mainLayer->addChild(bg);
+
+    // Title
+    auto title = CCLabelBMFont::create("GD Swap Mode", "goldFont.fnt");
+    title->setScale(0.7f);
+    title->setPosition(ccp(winSize.width / 2, winSize.height / 2 + 75));
+    m_mainLayer->addChild(title);
+
     auto menu = CCMenu::create();
     menu->setPosition(ccp(0, 0));
-    this->m_mainLayer->addChild(menu);
+    m_mainLayer->addChild(menu);
+
+    // Close button
+    auto closeSpr = CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png");
+    auto closeBtn = CCMenuItemSpriteExtra::create(
+        closeSpr, this, menu_selector(SwapConnectPopup::onClose));
+    closeBtn->setPosition(
+        ccp(winSize.width / 2 - 145, winSize.height / 2 + 95));
+    menu->addChild(closeBtn);
 
     // IP input label
     auto ipLabel =
         CCLabelBMFont::create("IP kolegi (Radmin VPN):", "bigFont.fnt");
     ipLabel->setScale(0.35f);
-    ipLabel->setPosition(ccp(winSize.width / 2, winSize.height - 55));
-    this->m_mainLayer->addChild(ipLabel);
+    ipLabel->setPosition(ccp(winSize.width / 2, winSize.height / 2 + 40));
+    m_mainLayer->addChild(ipLabel);
 
     // IP text input
     m_ipInput =
         CCTextInputNode::create(200.f, 30.f, "np. 26.0.0.1", "bigFont.fnt");
-    m_ipInput->setPosition(ccp(winSize.width / 2, winSize.height - 80));
+    m_ipInput->setPosition(ccp(winSize.width / 2, winSize.height / 2 + 15));
     m_ipInput->setMaxLabelScale(0.55f);
-    this->m_mainLayer->addChild(m_ipInput);
+    m_mainLayer->addChild(m_ipInput);
 
     // Status label
     m_statusLabel = CCLabelBMFont::create("Nie polaczono", "bigFont.fnt");
     m_statusLabel->setScale(0.3f);
     m_statusLabel->setColor(ccc3(200, 200, 200));
-    m_statusLabel->setPosition(ccp(winSize.width / 2, winSize.height - 105));
-    this->m_mainLayer->addChild(m_statusLabel);
+    m_statusLabel->setPosition(ccp(winSize.width / 2, winSize.height / 2 - 10));
+    m_mainLayer->addChild(m_statusLabel);
 
     // HOST button
     auto hostSpr = ButtonSprite::create("Hostuj", "goldFont.fnt",
                                         "GJ_button_01.png", 0.8f);
     auto hostBtn = CCMenuItemSpriteExtra::create(
         hostSpr, this, menu_selector(SwapConnectPopup::onHost));
-    hostBtn->setPosition(ccp(winSize.width / 2 - 70, 50));
+    hostBtn->setPosition(ccp(winSize.width / 2 - 70, winSize.height / 2 - 45));
     menu->addChild(hostBtn);
 
     // JOIN button
@@ -373,7 +396,7 @@ protected:
                                         "GJ_button_02.png", 0.8f);
     auto joinBtn = CCMenuItemSpriteExtra::create(
         joinSpr, this, menu_selector(SwapConnectPopup::onJoin));
-    joinBtn->setPosition(ccp(winSize.width / 2 + 70, 50));
+    joinBtn->setPosition(ccp(winSize.width / 2 + 70, winSize.height / 2 - 45));
     menu->addChild(joinBtn);
 
     // DISCONNECT button
@@ -381,14 +404,24 @@ protected:
                                       "GJ_button_06.png", 0.7f);
     auto dcBtn = CCMenuItemSpriteExtra::create(
         dcSpr, this, menu_selector(SwapConnectPopup::onDisconnect));
-    dcBtn->setPosition(ccp(winSize.width / 2, 20));
+    dcBtn->setPosition(ccp(winSize.width / 2, winSize.height / 2 - 80));
     menu->addChild(dcBtn);
 
     // Schedule status check
     this->schedule(schedule_selector(SwapConnectPopup::checkStatus), 0.5f);
 
+    this->setKeypadEnabled(true);
+    this->setTouchEnabled(true);
+
     return true;
   }
+
+  void onClose(CCObject *) {
+    this->setKeypadEnabled(false);
+    this->removeFromParentAndCleanup(true);
+  }
+
+  void keyBackClicked() override { onClose(nullptr); }
 
   void onHost(CCObject *) {
     auto net = NetworkManager::get();
@@ -459,12 +492,17 @@ protected:
 public:
   static SwapConnectPopup *create() {
     auto ret = new SwapConnectPopup();
-    if (ret->initAnchored(300.f, 180.f)) {
+    if (ret->init()) {
       ret->autorelease();
       return ret;
     }
     delete ret;
     return nullptr;
+  }
+
+  void show() {
+    auto scene = CCDirector::sharedDirector()->getRunningScene();
+    scene->addChild(this, 100);
   }
 };
 
