@@ -416,7 +416,6 @@ protected:
 
     this->setKeypadEnabled(true);
     this->setTouchEnabled(true);
-    this->registerWithTouchDispatcher();
 
     return true;
   }
@@ -507,11 +506,6 @@ public:
     }
     delete ret;
     return nullptr;
-  }
-
-  void show() {
-    auto scene = CCDirector::sharedDirector()->getRunningScene();
-    scene->addChild(this, 100);
   }
 };
 
