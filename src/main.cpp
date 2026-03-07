@@ -732,9 +732,45 @@ class $modify(SwapPlayLayer, PlayLayer) {
   }
 
   void postUpdate(float p0) {
+    auto net = NetworkManager::get();
+
+    // ══════════════════════════════════
+    // SPECTATING: set position BEFORE postUpdate
+    // so GD's camera calculation uses remote position
+    // ══════════════════════════════════
+    if (net->isConnected() && m_fields->m_active && !net->isActivePlayer()) {
+      if (net->m_hasRemotePos && this->m_player1) {
+        this->m_player1->setPositionX(net->m_remoteX);
+        this->m_player1->setPositionY(net->m_remoteY);
+        this->m_player1->setRotation(net->m_remoteRot);
+        this->m_player1->setVisible(false); // hide spectator's cube
+      }
+      // Apply remote inputs BEFORE physics
+      if (this->m_player1) {
+        if (net->m_remoteJump) {
+          this->m_player1->pushButton(PlayerButton::Jump);
+          net->m_remoteJump = false;
+        }
+        if (net->m_remoteRelease) {
+          this->m_player1->releaseButton(PlayerButton::Jump);
+          net->m_remoteRelease = false;
+        }
+      }
+      if (this->m_player2) {
+        if (net->m_remoteP2Jump) {
+          this->m_player2->pushButton(PlayerButton::Jump);
+          net->m_remoteP2Jump = false;
+        }
+        if (net->m_remoteP2Release) {
+          this->m_player2->releaseButton(PlayerButton::Jump);
+          net->m_remoteP2Release = false;
+        }
+      }
+    }
+
+    // Call original postUpdate (runs camera, effects, etc)
     PlayLayer::postUpdate(p0);
 
-    auto net = NetworkManager::get();
     if (!net->isConnected() || !m_fields->m_active)
       return;
 
@@ -759,6 +795,23 @@ class $modify(SwapPlayLayer, PlayLayer) {
       net->m_swapJustHappened = false;
       m_fields->m_displayTmr = 2.5f;
       m_fields->m_lastWarn = 0;
+
+      if (net->isActivePlayer()) {
+        // I'M NOW PLAYING — show player, teleport to where the other player was
+        if (this->m_player1) {
+          this->m_player1->setVisible(true);
+          if (net->m_hasRemotePos) {
+            this->m_player1->setPositionX(net->m_remoteX);
+            this->m_player1->setPositionY(net->m_remoteY);
+            this->m_player1->setRotation(net->m_remoteRot);
+          }
+        }
+      } else {
+        // I'M NOW SPECTATING — hide player
+        if (this->m_player1) {
+          this->m_player1->setVisible(false);
+        }
+      }
 
       if (m_fields->m_swapLbl) {
         auto txt =
@@ -801,43 +854,19 @@ class $modify(SwapPlayLayer, PlayLayer) {
     // ══════════════════════════════════
     // ACTIVE PLAYER → send position
     // ══════════════════════════════════
-    if (net->isActivePlayer()) {
-      if (this->m_player1) {
-        auto pos = this->m_player1->getPosition();
-        net->sendPos(pos.x, pos.y, this->m_player1->getRotation());
-      }
+    if (net->isActivePlayer() && this->m_player1) {
+      this->m_player1->setVisible(true); // ensure visible when playing
+      auto pos = this->m_player1->getPosition();
+      net->sendPos(pos.x, pos.y, this->m_player1->getRotation());
     }
+
     // ══════════════════════════════════
-    // SPECTATING → apply remote inputs + position
+    // SPECTATING → keep position synced after postUpdate
     // ══════════════════════════════════
-    else {
-      // Apply remote inputs
-      if (this->m_player1) {
-        if (net->m_remoteJump) {
-          this->m_player1->pushButton(PlayerButton::Jump);
-          net->m_remoteJump = false;
-        }
-        if (net->m_remoteRelease) {
-          this->m_player1->releaseButton(PlayerButton::Jump);
-          net->m_remoteRelease = false;
-        }
-      }
-      if (this->m_player2) {
-        if (net->m_remoteP2Jump) {
-          this->m_player2->pushButton(PlayerButton::Jump);
-          net->m_remoteP2Jump = false;
-        }
-        if (net->m_remoteP2Release) {
-          this->m_player2->releaseButton(PlayerButton::Jump);
-          net->m_remoteP2Release = false;
-        }
-      }
-      // Teleport player to remote position
-      if (net->m_hasRemotePos && this->m_player1) {
-        this->m_player1->setPositionX(net->m_remoteX);
-        this->m_player1->setPositionY(net->m_remoteY);
-        this->m_player1->setRotation(net->m_remoteRot);
-      }
+    if (!net->isActivePlayer() && net->m_hasRemotePos && this->m_player1) {
+      this->m_player1->setPositionX(net->m_remoteX);
+      this->m_player1->setPositionY(net->m_remoteY);
+      this->m_player1->setRotation(net->m_remoteRot);
     }
   }
 
