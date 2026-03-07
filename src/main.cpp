@@ -2,14 +2,10 @@
  * GD Swap Mode - Geode Mod for Geometry Dash 2.2
  * P2P LAN (Radmin VPN compatible)
  *
- * Features:
- * - Real UDP handshake with timeout
- * - Configurable swap timer
- * - Auto-level teleport
- * - Joiner locked in level
- * - Host exit → joiner exit
- * - Position sync for spectating
- * - Input relay
+ * ARCHITECTURE:
+ * - Recv thread ONLY pushes raw messages to a queue (m_inbox)
+ * - Main thread processes all messages in update/tick
+ * - ALL state changes happen on the main thread = no threading bugs
  */
 
 #include <Geode/Geode.hpp>
@@ -46,12 +42,13 @@ using namespace geode::prelude;
 #include <random>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 
 static constexpr int SWAP_PORT = 5055;
 
 // ═══════════════════════════════════════════
-// Network Manager
+// Network Manager — message queue architecture
 // ═══════════════════════════════════════════
 
 class NetworkManager {
@@ -77,34 +74,35 @@ public:
   int m_warningSeconds = 0;
   bool m_swapJustHappened = false;
 
-  // Remote inputs
+  // Remote state (written ONLY on main thread from processInbox)
   bool m_remoteJump = false;
   bool m_remoteRelease = false;
   bool m_remoteP2Jump = false;
   bool m_remoteP2Release = false;
-
-  // Position sync
   float m_remoteX = 0.f;
   float m_remoteY = 0.f;
   float m_remoteRot = 0.f;
   bool m_hasRemotePos = false;
-  int m_syncFrame = 0;
-
-  // Level sync
   bool m_needExitLevel = false;
 
-  // Network
+  int m_syncFrame = 0;
+
+  // Status for UI
+  std::string m_statusMsg = "Nie polaczono";
+  int m_statusColor = 0;
+
+  // ═══ MESSAGE QUEUE ═══
+  // Recv thread pushes here, main thread reads.
+  std::mutex m_inboxMtx;
+  std::vector<std::string> m_inbox;
+
+  // Network internals
   SOCKET m_sock = INVALID_SOCKET;
   sockaddr_in m_peerAddr{};
   bool m_peerKnown = false;
   std::atomic<bool> m_running{false};
   std::thread m_recvThread;
-  std::mutex m_mtx;
   std::mt19937 m_rng;
-
-  // UI
-  std::string m_statusMsg = "Nie polaczono";
-  int m_statusColor = 0;
 
   bool isConnected() { return m_state == State::Connected; }
 
@@ -124,7 +122,8 @@ public:
     disconnect();
     m_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (m_sock == INVALID_SOCKET) {
-      setStatus("Blad socketa!", 3);
+      m_statusMsg = "Blad socketa!";
+      m_statusColor = 3;
       return false;
     }
 
@@ -139,7 +138,8 @@ public:
     a.sin_port = htons(SWAP_PORT);
     a.sin_addr.s_addr = INADDR_ANY;
     if (::bind(m_sock, (sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
-      setStatus("Port 5055 zajety!", 3);
+      m_statusMsg = "Port 5055 zajety!";
+      m_statusColor = 3;
       closesocket(m_sock);
       m_sock = INVALID_SOCKET;
       return false;
@@ -153,7 +153,8 @@ public:
     m_rng.seed(std::random_device{}());
     m_recvThread = std::thread([this]() { recvLoop(); });
     m_recvThread.detach();
-    setStatus("Hostujesz! Czekam...", 1);
+    m_statusMsg = "Hostujesz! Czekam...";
+    m_statusColor = 1;
     log::info("HOST on :{}", SWAP_PORT);
     return true;
   }
@@ -163,7 +164,8 @@ public:
     disconnect();
     m_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (m_sock == INVALID_SOCKET) {
-      setStatus("Blad socketa!", 3);
+      m_statusMsg = "Blad socketa!";
+      m_statusColor = 3;
       return false;
     }
 #ifdef _WIN32
@@ -173,7 +175,8 @@ public:
     m_peerAddr.sin_family = AF_INET;
     m_peerAddr.sin_port = htons(SWAP_PORT);
     if (inet_pton(AF_INET, ip.c_str(), &m_peerAddr.sin_addr) != 1) {
-      setStatus("Nieprawidlowy IP!", 3);
+      m_statusMsg = "Zly IP!";
+      m_statusColor = 3;
       return false;
     }
     m_peerKnown = true;
@@ -184,8 +187,9 @@ public:
     m_running = true;
     m_recvThread = std::thread([this]() { recvLoop(); });
     m_recvThread.detach();
-    send("HELLO");
-    setStatus("Laczenie...", 1);
+    sendUDP("HELLO");
+    m_statusMsg = "Laczenie...";
+    m_statusColor = 1;
     return true;
   }
 
@@ -203,22 +207,82 @@ public:
     m_swapJustHappened = false;
     m_needExitLevel = false;
     m_hasRemotePos = false;
-    setStatus("Nie polaczono", 0);
+    m_remoteJump = m_remoteRelease = m_remoteP2Jump = m_remoteP2Release = false;
+    {
+      std::lock_guard<std::mutex> lk(m_inboxMtx);
+      m_inbox.clear();
+    }
+    m_statusMsg = "Nie polaczono";
+    m_statusColor = 0;
   }
 
-  void send(const std::string &msg) {
+  void sendUDP(const std::string &msg) {
     if (m_sock == INVALID_SOCKET || !m_peerKnown)
       return;
     sendto(m_sock, msg.c_str(), (int)msg.size(), 0, (sockaddr *)&m_peerAddr,
            sizeof(m_peerAddr));
   }
 
-  void updateConnection(float dt) {
-    if (m_state == State::Connecting) {
-      m_connectTimeout += dt;
-      if (m_connectTimeout >= 10.f) {
-        setStatus("Timeout!", 3);
-        disconnect();
+  // ═══════════════════════════════════════
+  // MAIN THREAD: process all queued messages
+  // Called from PlayLayer update or popup tick
+  // ═══════════════════════════════════════
+
+  void processInbox() {
+    std::vector<std::string> msgs;
+    {
+      std::lock_guard<std::mutex> lk(m_inboxMtx);
+      msgs.swap(m_inbox);
+    }
+
+    for (auto &msg : msgs) {
+      // Connection messages
+      if (msg == "_PEER_CONNECTED") {
+        m_state = State::Connected;
+        m_statusMsg = m_isHost ? "Kolega polaczony!" : "Polaczono z hostem!";
+        m_statusColor = 2;
+        log::info("Connection established!");
+        continue;
+      }
+
+      // Only process game messages when connected
+      if (m_state != State::Connected)
+        continue;
+
+      if (msg.rfind("LO ", 0) == 0) {
+        int lid = std::stoi(msg.substr(3));
+        log::info("LEVEL_OPEN {}", lid);
+        if (!m_inLevel)
+          tryOpenLevel(lid);
+      } else if (msg == "LL") {
+        log::info("Peer left level");
+        if (!m_isHost && m_inLevel) {
+          m_needExitLevel = true;
+        }
+      } else if (msg.rfind("S ", 0) == 0) {
+        m_activePlayer = std::stoi(msg.substr(2));
+        m_swapJustHappened = true;
+        m_warningSeconds = 0;
+        log::info("SWAP -> P{}", m_activePlayer);
+      } else if (msg.rfind("W ", 0) == 0) {
+        m_warningSeconds = std::stoi(msg.substr(2));
+      } else if (msg.rfind("P ", 0) == 0) {
+        std::istringstream iss(msg.substr(2));
+        int x, y, r;
+        if (iss >> x >> y >> r) {
+          m_remoteX = (float)x;
+          m_remoteY = (float)y;
+          m_remoteRot = (float)r;
+          m_hasRemotePos = true;
+        }
+      } else if (msg == "J") {
+        m_remoteJump = true;
+      } else if (msg == "R") {
+        m_remoteRelease = true;
+      } else if (msg == "J2") {
+        m_remoteP2Jump = true;
+      } else if (msg == "R2") {
+        m_remoteP2Release = true;
       }
     }
   }
@@ -230,7 +294,7 @@ public:
            (!m_isHost && m_activePlayer == 2);
   }
 
-  // ── Swap timer ──
+  // ── Swap timer (host, main thread) ──
 
   void updateSwapTimer(float dt) {
     if (!m_isHost || !isConnected() || !m_inLevel)
@@ -243,8 +307,7 @@ public:
       int s = (int)std::ceil(tl);
       if (s != m_warningSeconds && s >= 1 && s <= 3) {
         m_warningSeconds = s;
-        send("W " + std::to_string(s));
-        log::info("WARNING {}s", s);
+        sendUDP("W " + std::to_string(s));
       }
     }
 
@@ -253,8 +316,8 @@ public:
       m_swapJustHappened = true;
       m_warningSeconds = 0;
       resetTimer();
-      send("S " + std::to_string(m_activePlayer));
-      log::info("=== SWAP! === -> P{}", m_activePlayer);
+      sendUDP("S " + std::to_string(m_activePlayer));
+      log::info("=== SWAP === -> P{}", m_activePlayer);
     }
   }
 
@@ -262,7 +325,7 @@ public:
     m_swapTimer = 0.f;
     std::uniform_real_distribution<float> d(m_minSwapTime, m_maxSwapTime);
     m_nextSwapTime = d(m_rng);
-    log::info("Timer: {:.1f}s", m_nextSwapTime);
+    log::info("Next: {:.1f}s", m_nextSwapTime);
   }
 
   float getTimeLeft() { return m_nextSwapTime - m_swapTimer; }
@@ -274,45 +337,41 @@ public:
     m_warningSeconds = 0;
     m_hasRemotePos = false;
     m_needExitLevel = false;
+    m_syncFrame = 0;
     if (!isConnected())
       return;
     int lid = level->m_levelID.value();
     if (m_isHost) {
       resetTimer();
-      send("LO " + std::to_string(lid));
-      log::info("HOST entered level {}, timer={:.1f}s", lid, m_nextSwapTime);
+      sendUDP("LO " + std::to_string(lid));
+      log::info("HOST level {}, timer={:.1f}s", lid, m_nextSwapTime);
     } else {
-      send("JL");
-      log::info("JOINER entered level {}", lid);
+      sendUDP("JL");
+      log::info("JOINER level {}", lid);
     }
   }
 
   void onExitLevel() {
-    bool wasInLevel = m_inLevel;
+    bool was = m_inLevel;
     m_inLevel = false;
     m_hasRemotePos = false;
-    if (isConnected() && wasInLevel) {
-      send("LL");
-    }
+    if (isConnected() && was)
+      sendUDP("LL");
   }
-
-  // ── Position sync ──
 
   void sendPos(float x, float y, float rot) {
     m_syncFrame++;
     if (m_syncFrame % 2 != 0)
-      return; // every 2nd frame
+      return;
     char buf[64];
     snprintf(buf, sizeof(buf), "P %d %d %d", (int)x, (int)y, (int)rot);
-    send(buf);
+    sendUDP(buf);
   }
 
-  void sendJump() { send("J"); }
-  void sendRelease() { send("R"); }
-  void sendP2Jump() { send("J2"); }
-  void sendP2Release() { send("R2"); }
-
-  // ── Auto-open level ──
+  void sendJump() { sendUDP("J"); }
+  void sendRelease() { sendUDP("R"); }
+  void sendP2Jump() { sendUDP("J2"); }
+  void sendP2Release() { sendUDP("R2"); }
 
   void tryOpenLevel(int levelID) {
     geode::Loader::get()->queueInMainThread([levelID]() {
@@ -335,107 +394,51 @@ public:
     });
   }
 
-  // ── Force exit level (for joiner when host exits) ──
-
-  void forceExitLevel() {
-    geode::Loader::get()->queueInMainThread([]() {
-      auto pl = PlayLayer::get();
-      if (pl) {
-        auto net = NetworkManager::get();
-        net->m_needExitLevel = true; // signal to our hook to allow quit
-        net->m_inLevel = false;
-        pl->onQuit();
-      }
-    });
-  }
-
 private:
   NetworkManager() {}
 
-  void setStatus(const std::string &s, int c) {
-    std::lock_guard<std::mutex> lk(m_mtx);
-    m_statusMsg = s;
-    m_statusColor = c;
-  }
+  // ═══════════════════════════════════════
+  // RECV THREAD: only reads UDP and pushes to inbox
+  // NO state changes here except m_peerAddr/m_peerKnown for initial handshake
+  // ═══════════════════════════════════════
 
   void recvLoop() {
     char buf[256];
     sockaddr_in from{};
-    int fl = sizeof(from);
+
     while (m_running) {
+      int fl = sizeof(from);
       int n = recvfrom(m_sock, buf, sizeof(buf) - 1, 0, (sockaddr *)&from, &fl);
       if (n <= 0)
         continue;
       buf[n] = '\0';
       std::string msg(buf);
 
+      // Host handshake: learn peer address
       if (m_isHost && m_state == State::Hosting && msg == "HELLO") {
-        std::lock_guard<std::mutex> lk(m_mtx);
         m_peerAddr = from;
         m_peerKnown = true;
-        m_state = State::Connected;
-        send("WELCOME");
-        m_statusMsg = "Kolega polaczony!";
-        m_statusColor = 2;
-        log::info("HOST: peer connected");
+        sendUDP("WELCOME");
+        // Push connection event to main thread
+        std::lock_guard<std::mutex> lk(m_inboxMtx);
+        m_inbox.push_back("_PEER_CONNECTED");
+        log::info("HOST: got HELLO");
         continue;
       }
 
+      // Joiner handshake: confirm connection
       if (!m_isHost && m_state == State::Connecting && msg == "WELCOME") {
-        std::lock_guard<std::mutex> lk(m_mtx);
-        m_state = State::Connected;
-        m_statusMsg = "Polaczono z hostem!";
-        m_statusColor = 2;
-        log::info("JOINER: connected!");
+        std::lock_guard<std::mutex> lk(m_inboxMtx);
+        m_inbox.push_back("_PEER_CONNECTED");
+        log::info("JOINER: got WELCOME");
         continue;
       }
 
-      if (m_state == State::Connected)
-        handleMsg(msg);
-    }
-  }
-
-  void handleMsg(const std::string &msg) {
-    std::lock_guard<std::mutex> lk(m_mtx);
-
-    if (msg.rfind("LO ", 0) == 0) {
-      int lid = std::stoi(msg.substr(3));
-      log::info("Got LEVEL_OPEN {}", lid);
-      if (!m_inLevel)
-        tryOpenLevel(lid);
-    } else if (msg == "LL") {
-      // Peer left level — if host left, joiner must exit too
-      log::info("Peer left level");
-      if (!m_isHost && m_inLevel) {
-        forceExitLevel();
+      // Queue all other messages for main thread
+      {
+        std::lock_guard<std::mutex> lk(m_inboxMtx);
+        m_inbox.push_back(std::move(msg));
       }
-    } else if (msg == "JL") {
-      log::info("Joiner entered level");
-    } else if (msg.rfind("S ", 0) == 0) {
-      m_activePlayer = std::stoi(msg.substr(2));
-      m_swapJustHappened = true;
-      m_warningSeconds = 0;
-      log::info("SWAP -> P{}", m_activePlayer);
-    } else if (msg.rfind("W ", 0) == 0) {
-      m_warningSeconds = std::stoi(msg.substr(2));
-    } else if (msg.rfind("P ", 0) == 0) {
-      // Position: P x y rot
-      std::istringstream iss(msg.substr(2));
-      int x, y, r;
-      if (iss >> x >> y >> r) {
-        m_remoteX = (float)x;
-        m_remoteY = (float)y;
-        m_remoteRot = (float)r;
-        m_hasRemotePos = true;
-      }
-    } else if (msg == "J") {
-      m_remoteJump = true;
-    } else if (msg == "R") {
-      m_remoteRelease = true;
-    } else if (msg == "J2") {
-      m_remoteP2Jump = true;
-    } else if (msg == "R2") {
-      m_remoteP2Release = true;
     }
   }
 };
@@ -501,8 +504,8 @@ protected:
     m_statusLabel->setPosition(ccp(s.width / 2, s.height - 142));
     m_mainLayer->addChild(m_statusLabel);
 
-    auto note = CCLabelBMFont::create(
-        "Host wchodzi na level = joiner automatycznie!", "bigFont.fnt");
+    auto note = CCLabelBMFont::create("Host wchodzi na level = joiner auto!",
+                                      "bigFont.fnt");
     note->setScale(0.18f);
     note->setColor(ccc3(255, 200, 100));
     note->setPosition(ccp(s.width / 2, s.height - 158));
@@ -571,8 +574,20 @@ protected:
 
   void tick(float dt) {
     auto net = NetworkManager::get();
-    net->updateConnection(dt);
-    std::lock_guard<std::mutex> lk(net->m_mtx);
+
+    // Process messages on main thread
+    net->processInbox();
+
+    // Connection timeout
+    if (net->m_state == NetworkManager::State::Connecting) {
+      net->m_connectTimeout += dt;
+      if (net->m_connectTimeout >= 10.f) {
+        net->m_statusMsg = "Timeout!";
+        net->m_statusColor = 3;
+        net->disconnect();
+      }
+    }
+
     m_statusLabel->setString(net->m_statusMsg.c_str());
     static const cocos2d::ccColor3B cols[] = {
         {200, 200, 200}, {255, 255, 100}, {100, 255, 100}, {255, 80, 80}};
@@ -626,6 +641,7 @@ class $modify(SwapPlayLayer, PlayLayer) {
     CCLabelBMFont *m_dbgLbl = nullptr;
     float m_displayTmr = 0.f;
     int m_lastWarn = 0;
+    bool m_initialized = false;
   };
 
   bool init(GJGameLevel *level, bool useReplay, bool dontCreateObjects) {
@@ -635,6 +651,7 @@ class $modify(SwapPlayLayer, PlayLayer) {
     if (!net->isConnected())
       return true;
 
+    m_fields->m_initialized = true;
     auto ws = CCDirector::sharedDirector()->getWinSize();
 
     m_fields->m_swapLbl = CCLabelBMFont::create("", "bigFont.fnt");
@@ -659,18 +676,16 @@ class $modify(SwapPlayLayer, PlayLayer) {
 
     net->onEnterLevel(level);
     updMode();
-    log::info("PlayLayer OK, host={}, next={:.1f}s", net->m_isHost,
-              net->m_nextSwapTime);
+    log::info("=== PlayLayer INIT === host={} timer={:.1f}s active=P{}",
+              net->m_isHost, net->m_nextSwapTime, net->m_activePlayer);
     return true;
   }
 
   void onQuit() {
     auto net = NetworkManager::get();
-    // Joiner can only quit if host triggered it (needExitLevel) or disconnected
+    // Joiner blocked UNLESS host triggered exit
     if (net->isConnected() && !net->m_isHost && !net->m_needExitLevel) {
-      FLAlertLayer::create("GD Swap",
-                           "Host kontroluje sesje! Nie mozesz wyjsc.", "OK")
-          ->show();
+      FLAlertLayer::create("GD Swap", "Host kontroluje sesje!", "OK")->show();
       return;
     }
     net->m_needExitLevel = false;
@@ -680,26 +695,49 @@ class $modify(SwapPlayLayer, PlayLayer) {
 
   void update(float dt) {
     PlayLayer::update(dt);
+
     auto net = NetworkManager::get();
-    if (!net->isConnected())
+    if (!net->isConnected() || !m_fields->m_initialized)
       return;
 
-    // ── Swap timer (host) ──
-    net->updateSwapTimer(dt);
+    // ╔══════════════════════════════════════╗
+    // ║  PROCESS NETWORK MESSAGES (MAIN THR) ║
+    // ╚══════════════════════════════════════╝
+    net->processInbox();
 
-    // ── Debug display ──
-    if (m_fields->m_dbgLbl) {
-      std::string d;
-      if (net->m_isHost) {
-        d = fmt::format("{:.0f}s P{}", net->getTimeLeft(), net->m_activePlayer);
-      } else {
-        d = fmt::format("P{} {}", net->m_activePlayer,
-                        net->isActivePlayer() ? "GRASZ" : "PATRZ");
-      }
-      m_fields->m_dbgLbl->setString(d.c_str());
+    // ╔══════════════════════════════════════╗
+    // ║  HOST EXIT → JOINER EXIT             ║
+    // ╚══════════════════════════════════════╝
+    if (net->m_needExitLevel) {
+      net->m_needExitLevel = false;
+      net->m_inLevel = false;
+      PlayLayer::onQuit();
+      return;
     }
 
-    // ── Swap event ──
+    // ╔══════════════════════════════════════╗
+    // ║  SWAP TIMER (HOST ONLY)              ║
+    // ╚══════════════════════════════════════╝
+    net->updateSwapTimer(dt);
+
+    // ╔══════════════════════════════════════╗
+    // ║  DEBUG DISPLAY                       ║
+    // ╚══════════════════════════════════════╝
+    if (m_fields->m_dbgLbl) {
+      if (net->m_isHost) {
+        float tl = net->getTimeLeft();
+        auto t = fmt::format("{:.0f}s P{}", tl, net->m_activePlayer);
+        m_fields->m_dbgLbl->setString(t.c_str());
+      } else {
+        auto t = fmt::format("P{} {}", net->m_activePlayer,
+                             net->isActivePlayer() ? "GRASZ" : "PATRZ");
+        m_fields->m_dbgLbl->setString(t.c_str());
+      }
+    }
+
+    // ╔══════════════════════════════════════╗
+    // ║  SWAP EVENT                          ║
+    // ╚══════════════════════════════════════╝
     if (net->m_swapJustHappened) {
       net->m_swapJustHappened = false;
       m_fields->m_displayTmr = 2.5f;
@@ -714,9 +752,13 @@ class $modify(SwapPlayLayer, PlayLayer) {
         m_fields->m_swapLbl->runAction(CCScaleTo::create(0.3f, 0.5f));
       }
       updMode();
+      log::info("SWAP displayed: active={} me={}", net->m_activePlayer,
+                net->isActivePlayer() ? "PLAYING" : "SPECTATING");
     }
 
-    // ── Warning ──
+    // ╔══════════════════════════════════════╗
+    // ║  WARNING COUNTDOWN                   ║
+    // ╚══════════════════════════════════════╝
     if (net->m_warningSeconds > 0 &&
         net->m_warningSeconds != m_fields->m_lastWarn) {
       m_fields->m_lastWarn = net->m_warningSeconds;
@@ -730,7 +772,7 @@ class $modify(SwapPlayLayer, PlayLayer) {
       }
     }
 
-    // ── Fade out ──
+    // Fade out
     if (m_fields->m_displayTmr > 0.f) {
       m_fields->m_displayTmr -= dt;
       if (m_fields->m_displayTmr <= 0.f && net->m_warningSeconds == 0 &&
@@ -740,36 +782,41 @@ class $modify(SwapPlayLayer, PlayLayer) {
       }
     }
 
-    // ══════════════════════════════════════
-    // POSITION SYNC + INPUT RELAY
-    // ══════════════════════════════════════
+    // ╔══════════════════════════════════════╗
+    // ║  POSITION SYNC + INPUT RELAY         ║
+    // ╚══════════════════════════════════════╝
 
     if (net->isActivePlayer()) {
-      // WE are playing → send our position to spectator
+      // I'M PLAYING → send my position every 2 frames
       if (this->m_player1) {
         auto pos = this->m_player1->getPosition();
-        net->sendPos(pos.x, pos.y, this->m_player1->getRotation());
+        float rot = this->m_player1->getRotation();
+        net->sendPos(pos.x, pos.y, rot);
       }
     } else {
-      // WE are spectating → apply remote inputs + teleport to remote position
-      if (net->m_remoteJump) {
-        this->m_player1->pushButton(PlayerButton::Jump);
-        net->m_remoteJump = false;
+      // I'M SPECTATING → apply remote inputs AND teleport to remote position
+      if (this->m_player1) {
+        if (net->m_remoteJump) {
+          this->m_player1->pushButton(PlayerButton::Jump);
+          net->m_remoteJump = false;
+        }
+        if (net->m_remoteRelease) {
+          this->m_player1->releaseButton(PlayerButton::Jump);
+          net->m_remoteRelease = false;
+        }
       }
-      if (net->m_remoteRelease) {
-        this->m_player1->releaseButton(PlayerButton::Jump);
-        net->m_remoteRelease = false;
-      }
-      if (net->m_remoteP2Jump && this->m_player2) {
-        this->m_player2->pushButton(PlayerButton::Jump);
-        net->m_remoteP2Jump = false;
-      }
-      if (net->m_remoteP2Release && this->m_player2) {
-        this->m_player2->releaseButton(PlayerButton::Jump);
-        net->m_remoteP2Release = false;
+      if (this->m_player2) {
+        if (net->m_remoteP2Jump) {
+          this->m_player2->pushButton(PlayerButton::Jump);
+          net->m_remoteP2Jump = false;
+        }
+        if (net->m_remoteP2Release) {
+          this->m_player2->releaseButton(PlayerButton::Jump);
+          net->m_remoteP2Release = false;
+        }
       }
 
-      // TELEPORT player to remote position so spectator sees active player
+      // TELEPORT to remote player position (spectator sees active player)
       if (net->m_hasRemotePos && this->m_player1) {
         this->m_player1->setPositionX(net->m_remoteX);
         this->m_player1->setPositionY(net->m_remoteY);
@@ -811,6 +858,6 @@ class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
         push ? net->sendP2Jump() : net->sendP2Release();
       }
     }
-    // Inactive → blocked
+    // Inactive → block
   }
 };
