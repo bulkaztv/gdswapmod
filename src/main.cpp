@@ -13,6 +13,7 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/ui/Popup.hpp>
+#include <Geode/ui/TextInput.hpp>
 
 using namespace geode::prelude;
 
@@ -328,7 +329,7 @@ private:
 
 class SwapConnectPopup : public geode::Popup {
 protected:
-  CCTextInputNode *m_ipInput = nullptr;
+  geode::TextInput *m_ipInput = nullptr;
   CCLabelBMFont *m_statusLabel = nullptr;
 
   bool init() {
@@ -349,18 +350,11 @@ protected:
     ipLabel->setPosition(ccp(size.width / 2, size.height - 55));
     m_mainLayer->addChild(ipLabel);
 
-    // IP text input with visible background
-    auto inputBg = CCScale9Sprite::create("square02_small.png");
-    inputBg->setContentSize({220.f, 30.f});
-    inputBg->setPosition(ccp(size.width / 2, size.height - 80));
-    inputBg->setOpacity(100);
-    m_mainLayer->addChild(inputBg);
-
-    m_ipInput =
-        CCTextInputNode::create(200.f, 30.f, "np. 26.0.0.1", "bigFont.fnt");
+    // IP text input (Geode TextInput has built-in background & touch handling)
+    m_ipInput = geode::TextInput::create(220.f, "np. 26.0.0.1");
     m_ipInput->setPosition(ccp(size.width / 2, size.height - 80));
-    m_ipInput->setMaxLabelScale(0.55f);
-    m_ipInput->setAllowedChars("0123456789.");
+    m_ipInput->setFilter("0123456789.");
+    m_ipInput->setMaxCharCount(15);
     m_mainLayer->addChild(m_ipInput);
 
     // Status label
@@ -427,7 +421,7 @@ protected:
       return;
     }
 
-    std::string ip = m_ipInput->getString();
+    std::string ip = std::string(m_ipInput->getString());
     if (ip.empty()) {
       m_statusLabel->setString("Wpisz IP kolegi!");
       m_statusLabel->setColor(ccc3(255, 80, 80));
