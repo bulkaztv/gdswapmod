@@ -88,9 +88,6 @@ public:
   // Level exit
   bool m_forceExit = false;
 
-  // Freeze system
-  bool m_frozen = false;
-
   // Connection timeout
   float m_connectTimeout = 0.f;
 
@@ -311,9 +308,6 @@ public:
       m_remoteP2Release = true;
     } else if (msg == "D") {
       m_remoteDeath = true;
-    } else if (msg == "GO") {
-      m_frozen = false;
-      log::info("GO received - unfreezing!");
     }
   }
 
@@ -379,7 +373,6 @@ public:
     m_hasRemotePos = false;
     m_forceExit = false;
     m_syncFrame = 0;
-    m_frozen = true; // start frozen, host presses K to begin
 
     if (!isConnected())
       return;
@@ -678,13 +671,9 @@ class $modify(SwapPlayLayer, PlayLayer) {
     CCLabelBMFont *m_swapLbl = nullptr;
     CCLabelBMFont *m_modeLbl = nullptr;
     CCLabelBMFont *m_dbgLbl = nullptr;
-    CCLabelBMFont *m_freezeLbl = nullptr;
     float m_displayTmr = 0.f;
     int m_lastWarn = 0;
     bool m_active = false;
-    float m_startX = 0.f;
-    float m_startY = 0.f;
-    bool m_lastKState = false;
   };
 
   bool init(GJGameLevel *level, bool useReplay, bool dontCreateObjects) {
@@ -722,21 +711,6 @@ class $modify(SwapPlayLayer, PlayLayer) {
     m_fields->m_dbgLbl->setColor(ccc3(180, 180, 180));
     this->addChild(m_fields->m_dbgLbl);
 
-    // Save start position for freeze
-    if (this->m_player1) {
-      m_fields->m_startX = this->m_player1->getPositionX();
-      m_fields->m_startY = this->m_player1->getPositionY();
-    }
-
-    // Freeze label
-    m_fields->m_freezeLbl =
-        CCLabelBMFont::create("Host: nacisnij K", "bigFont.fnt");
-    m_fields->m_freezeLbl->setPosition(ccp(ws.width / 2, ws.height / 2 + 30));
-    m_fields->m_freezeLbl->setScale(0.5f);
-    m_fields->m_freezeLbl->setZOrder(9999);
-    m_fields->m_freezeLbl->setColor(ccc3(255, 255, 100));
-    this->addChild(m_fields->m_freezeLbl);
-
     net->onEnterLevel(level);
     refreshModeLabel();
 
@@ -765,42 +739,6 @@ class $modify(SwapPlayLayer, PlayLayer) {
 
     if (!net->isConnected() || !m_fields->m_active)
       return;
-
-    // ══════════════════════════════════════
-    // FREEZE: both players stand still
-    // ══════════════════════════════════════
-    if (net->m_frozen) {
-      // Keep player at start position
-      if (this->m_player1) {
-        this->m_player1->setPositionX(m_fields->m_startX);
-        this->m_player1->setPositionY(m_fields->m_startY);
-        this->m_player1->setRotation(0.f);
-      }
-      // Show freeze label
-      if (m_fields->m_freezeLbl) {
-        m_fields->m_freezeLbl->setVisible(true);
-        if (net->m_isHost)
-          m_fields->m_freezeLbl->setString("Nacisnij K aby zaczac!");
-        else
-          m_fields->m_freezeLbl->setString("Czekam na hosta...");
-      }
-      // Host: detect K press
-      if (net->m_isHost) {
-        bool kDown = (GetAsyncKeyState('K') & 0x8000) != 0;
-        if (kDown && !m_fields->m_lastKState) {
-          net->m_frozen = false;
-          net->sendUDP("GO");
-          net->resetTimer();
-          log::info("HOST pressed K - GO!");
-        }
-        m_fields->m_lastKState = kDown;
-      }
-      return; // don't process game logic while frozen
-    }
-
-    // Hide freeze label when playing
-    if (m_fields->m_freezeLbl)
-      m_fields->m_freezeLbl->setVisible(false);
 
     // ── Swap timer (host) ──
     net->updateSwapTimer(p0);
@@ -882,38 +820,22 @@ class $modify(SwapPlayLayer, PlayLayer) {
       }
       net->m_applyingRemote = false;
 
-      // Active player died → freeze + reset
+      // Active player died → spectator resets too
       if (net->m_remoteDeath) {
         net->m_remoteDeath = false;
-        net->m_frozen = true;
         this->resetLevel();
-        if (this->m_player1) {
-          m_fields->m_startX = this->m_player1->getPositionX();
-          m_fields->m_startY = this->m_player1->getPositionY();
-        }
       }
     }
   }
 
-  // Death handling
+  // Spectator can't die (fixes latency desync)
   void destroyPlayer(PlayerObject *player, GameObject *obj) {
     auto net = NetworkManager::get();
-    // Frozen → no death
-    if (net->isConnected() && net->m_frozen)
-      return;
-    // Spectator → immune to death (fixes latency desync)
     if (net->isConnected() && !net->isActivePlayer())
       return;
-    // Active player → die + send D + freeze
     PlayLayer::destroyPlayer(player, obj);
     if (net->isConnected() && net->isActivePlayer()) {
       net->sendUDP("D");
-      net->m_frozen = true;
-      // Save respawn position
-      if (this->m_player1) {
-        m_fields->m_startX = this->m_player1->getPositionX();
-        m_fields->m_startY = this->m_player1->getPositionY();
-      }
     }
   }
 
