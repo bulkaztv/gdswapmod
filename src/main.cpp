@@ -75,6 +75,7 @@ public:
   bool m_remoteRelease = false;
   bool m_remoteP2Jump = false;
   bool m_remoteP2Release = false;
+  bool m_remoteDeath = false;
 
   // Position sync (main thread only)
   float m_remoteX = 0.f;
@@ -233,6 +234,7 @@ public:
     m_forceExit = false;
     m_hasRemotePos = false;
     m_remoteJump = m_remoteRelease = m_remoteP2Jump = m_remoteP2Release = false;
+    m_remoteDeath = false;
     m_statusMsg = "Nie polaczono";
     m_statusColor = 0;
   }
@@ -303,6 +305,8 @@ public:
       m_remoteP2Jump = true;
     } else if (msg == "R2") {
       m_remoteP2Release = true;
+    } else if (msg == "D") {
+      m_remoteDeath = true;
     }
   }
 
@@ -730,16 +734,6 @@ class $modify(SwapPlayLayer, PlayLayer) {
 
   void postUpdate(float p0) {
     auto net = NetworkManager::get();
-
-    // BEFORE original postUpdate: sync spectator position so camera follows
-    if (net->isConnected() && m_fields->m_active && !net->isActivePlayer()) {
-      if (net->m_hasRemotePos && this->m_player1) {
-        this->m_player1->setPositionX(net->m_remoteX);
-        this->m_player1->setPositionY(net->m_remoteY);
-        this->m_player1->setRotation(net->m_remoteRot);
-      }
-    }
-
     PlayLayer::postUpdate(p0);
 
     if (!net->isConnected() || !m_fields->m_active)
@@ -764,16 +758,6 @@ class $modify(SwapPlayLayer, PlayLayer) {
       net->m_swapJustHappened = false;
       m_fields->m_displayTmr = 2.5f;
       m_fields->m_lastWarn = 0;
-
-      if (net->isActivePlayer() && this->m_player1) {
-        // Now playing: show cube, teleport to where the other player was
-        this->m_player1->setVisible(true);
-        if (net->m_hasRemotePos) {
-          this->m_player1->setPositionX(net->m_remoteX);
-          this->m_player1->setPositionY(net->m_remoteY);
-          this->m_player1->setRotation(net->m_remoteRot);
-        }
-      }
 
       if (m_fields->m_swapLbl) {
         auto txt =
@@ -812,35 +796,46 @@ class $modify(SwapPlayLayer, PlayLayer) {
       }
     }
 
-    // ══════════════════════════════════════════
-    // ACTIVE: visible, send position every frame
-    // ══════════════════════════════════════════
-    if (net->isActivePlayer() && this->m_player1) {
-      this->m_player1->setVisible(true);
-      auto pos = this->m_player1->getPosition();
-      net->sendPos(pos.x, pos.y, this->m_player1->getRotation());
-    }
-
-    // ══════════════════════════════════════════
-    // SPECTATING: invisible, sync position
-    // ══════════════════════════════════════════
-    if (!net->isActivePlayer() && this->m_player1) {
-      this->m_player1->setVisible(false);
-      if (net->m_hasRemotePos) {
-        this->m_player1->setPositionX(net->m_remoteX);
-        this->m_player1->setPositionY(net->m_remoteY);
-        this->m_player1->setRotation(net->m_remoteRot);
+    // ══════════════════════════════════════
+    // SPECTATING: apply remote jump inputs
+    // Cube plays normally — same jumps as active player
+    // ══════════════════════════════════════
+    if (!net->isActivePlayer()) {
+      if (this->m_player1) {
+        if (net->m_remoteJump) {
+          this->m_player1->pushButton(PlayerButton::Jump);
+          net->m_remoteJump = false;
+        }
+        if (net->m_remoteRelease) {
+          this->m_player1->releaseButton(PlayerButton::Jump);
+          net->m_remoteRelease = false;
+        }
+      }
+      if (this->m_player2) {
+        if (net->m_remoteP2Jump) {
+          this->m_player2->pushButton(PlayerButton::Jump);
+          net->m_remoteP2Jump = false;
+        }
+        if (net->m_remoteP2Release) {
+          this->m_player2->releaseButton(PlayerButton::Jump);
+          net->m_remoteP2Release = false;
+        }
+      }
+      // If active player died → reset us too
+      if (net->m_remoteDeath) {
+        net->m_remoteDeath = false;
+        this->resetLevel();
       }
     }
   }
 
-  // PREVENT spectator from dying (death = respawn = desync)
+  // When active player dies → send death to peer so they reset too
   void destroyPlayer(PlayerObject *player, GameObject *obj) {
     auto net = NetworkManager::get();
-    if (net->isConnected() && !net->isActivePlayer()) {
-      return; // spectator can't die
-    }
     PlayLayer::destroyPlayer(player, obj);
+    if (net->isConnected() && net->isActivePlayer()) {
+      net->sendUDP("D");
+    }
   }
 
   void refreshModeLabel() {
