@@ -13,7 +13,6 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 
-
 using namespace geode::prelude;
 
 // ─────────────────────────────────────────
@@ -336,6 +335,8 @@ protected:
       return false;
 
     auto winSize = CCDirector::sharedDirector()->getWinSize();
+    log::info("SwapConnectPopup::init - winSize: {}x{}", winSize.width,
+              winSize.height);
 
     // Dark background
     m_noElasticity = true;
@@ -352,7 +353,10 @@ protected:
 
     auto menu = CCMenu::create();
     menu->setPosition(ccp(0, 0));
-    m_mainLayer->addChild(menu);
+    m_mainLayer->addChild(menu, 10);
+
+    // Set menu touch priority higher than FLAlertLayer's
+    menu->setTouchPriority(-502);
 
     // Close button
     auto closeSpr = CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png");
@@ -412,6 +416,7 @@ protected:
 
     this->setKeypadEnabled(true);
     this->setTouchEnabled(true);
+    this->registerWithTouchDispatcher();
 
     return true;
   }
@@ -424,16 +429,20 @@ protected:
   void keyBackClicked() override { onClose(nullptr); }
 
   void onHost(CCObject *) {
+    log::info("onHost clicked!");
     auto net = NetworkManager::get();
     if (net->m_connected) {
+      log::info("Already connected");
       m_statusLabel->setString("Juz polaczony!");
       return;
     }
 
     if (net->hostSession()) {
+      log::info("Host session started successfully");
       m_statusLabel->setString("Hostujesz! Czekam na kolege...");
       m_statusLabel->setColor(ccc3(255, 255, 100));
     } else {
+      log::info("Host session FAILED");
       m_statusLabel->setString("Blad hostowania!");
       m_statusLabel->setColor(ccc3(255, 80, 80));
     }
