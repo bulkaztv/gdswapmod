@@ -735,6 +735,16 @@ class $modify(SwapPlayLayer, PlayLayer) {
 
   void postUpdate(float p0) {
     auto net = NetworkManager::get();
+
+    // BEFORE postUpdate: teleport spectator so camera follows active player
+    if (net->isConnected() && m_fields->m_active && !net->isActivePlayer()) {
+      if (net->m_hasRemotePos && this->m_player1) {
+        this->m_player1->setPositionX(net->m_remoteX);
+        this->m_player1->setPositionY(net->m_remoteY);
+        this->m_player1->setRotation(net->m_remoteRot);
+      }
+    }
+
     PlayLayer::postUpdate(p0);
 
     if (!net->isConnected() || !m_fields->m_active)
@@ -797,38 +807,31 @@ class $modify(SwapPlayLayer, PlayLayer) {
       }
     }
 
-    // ══════════════════════════════════════
-    // SPECTATING: apply remote inputs
-    // ══════════════════════════════════════
-    if (!net->isActivePlayer()) {
-      net->m_applyingRemote = true;
-      if (net->m_remoteJump) {
-        GJBaseGameLayer::handleButton(true, 1, true);
-        net->m_remoteJump = false;
-      }
-      if (net->m_remoteRelease) {
-        GJBaseGameLayer::handleButton(false, 1, true);
-        net->m_remoteRelease = false;
-      }
-      if (net->m_remoteP2Jump) {
-        GJBaseGameLayer::handleButton(true, 1, false);
-        net->m_remoteP2Jump = false;
-      }
-      if (net->m_remoteP2Release) {
-        GJBaseGameLayer::handleButton(false, 1, false);
-        net->m_remoteP2Release = false;
-      }
-      net->m_applyingRemote = false;
+    // ═══════════════════════════════════════
+    // ACTIVE: send position every frame
+    // ═══════════════════════════════════════
+    if (net->isActivePlayer() && this->m_player1) {
+      auto pos = this->m_player1->getPosition();
+      net->sendPos(pos.x, pos.y, this->m_player1->getRotation());
+    }
 
-      // Active player died → spectator resets too
-      if (net->m_remoteDeath) {
-        net->m_remoteDeath = false;
-        this->resetLevel();
-      }
+    // ═══════════════════════════════════════
+    // SPECTATOR: teleport to EXACT position
+    // ═══════════════════════════════════════
+    if (!net->isActivePlayer() && this->m_player1 && net->m_hasRemotePos) {
+      this->m_player1->setPositionX(net->m_remoteX);
+      this->m_player1->setPositionY(net->m_remoteY);
+      this->m_player1->setRotation(net->m_remoteRot);
+    }
+
+    // Death sync
+    if (!net->isActivePlayer() && net->m_remoteDeath) {
+      net->m_remoteDeath = false;
+      this->resetLevel();
     }
   }
 
-  // Spectator can't die (fixes latency desync)
+  // Spectator CANNOT die (teleported cube, immune to obstacles)
   void destroyPlayer(PlayerObject *player, GameObject *obj) {
     auto net = NetworkManager::get();
     if (net->isConnected() && !net->isActivePlayer())
@@ -854,7 +857,7 @@ class $modify(SwapPlayLayer, PlayLayer) {
 };
 
 // ═════════════════════════════════════════
-// Input Hook
+// Input Hook — block spectator
 // ═════════════════════════════════════════
 
 class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
@@ -864,22 +867,10 @@ class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
       GJBaseGameLayer::handleButton(push, button, player1);
       return;
     }
-
-    // Remote inputs bypass the block (set by postUpdate)
-    if (net->m_applyingRemote) {
-      GJBaseGameLayer::handleButton(push, button, player1);
-      return;
-    }
-
-    // Active player: allow + send to peer
+    // Active player: normal input
     if (net->isActivePlayer()) {
       GJBaseGameLayer::handleButton(push, button, player1);
-      if (player1) {
-        push ? net->sendJump() : net->sendRelease();
-      } else {
-        push ? net->sendP2Jump() : net->sendP2Release();
-      }
     }
-    // Inactive without remote flag → block
+    // Spectator: ALL input blocked (cube is teleported by position sync)
   }
 };
