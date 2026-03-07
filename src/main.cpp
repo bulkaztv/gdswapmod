@@ -8,19 +8,11 @@
  * The inactive player's inputs are blocked; they watch the active player.
  */
 
-#include <Geode/Geode.hpp>
-#include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/MenuLayer.hpp>
-#include <Geode/modify/PlayLayer.hpp>
-
-
-using namespace geode::prelude;
-
-// ─────────────────────────────────────────
-// P2P Network Manager (Direct UDP)
-// ─────────────────────────────────────────
-
+// Must be defined BEFORE any Windows headers to prevent winsock1 conflicts
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <WS2tcpip.h>
 #include <WinSock2.h>
 
@@ -36,9 +28,19 @@ using namespace geode::prelude;
 #define closesocket close
 #endif
 
+#include <Geode/Geode.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/modify/PlayLayer.hpp>
+
+using namespace geode::prelude;
+
+// ─────────────────────────────────────────
+// P2P Network Manager (Direct UDP)
+// ─────────────────────────────────────────
+
 #include <mutex>
 #include <random>
-
 
 static constexpr int SWAP_PORT = 5055;
 
