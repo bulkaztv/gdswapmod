@@ -12,7 +12,7 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
-
+#include <Geode/ui/Popup.hpp>
 
 using namespace geode::prelude;
 
@@ -40,7 +40,6 @@ using namespace geode::prelude;
 
 #include <mutex>
 #include <random>
-
 
 static constexpr int SWAP_PORT = 5055;
 
