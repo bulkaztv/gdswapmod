@@ -284,7 +284,7 @@ public:
       m_activePlayer = p;
       m_swapJustHappened = true;
       m_warningSeconds = 0;
-      m_hasRemotePos = false; // reset position on swap
+      // DON'T clear m_hasRemotePos — need it for swap teleport
       log::info("=== SWAP === active=P{}", p);
     } else if (msg.rfind("W ", 0) == 0) {
       m_warningSeconds = std::stoi(msg.substr(2));
@@ -780,6 +780,13 @@ class $modify(SwapPlayLayer, PlayLayer) {
         m_fields->m_swapLbl->stopAllActions();
         m_fields->m_swapLbl->runAction(CCScaleTo::create(0.3f, 0.5f));
       }
+      // Teleport new active player to where the other player was
+      if (net->isActivePlayer() && net->m_hasRemotePos && this->m_player1) {
+        this->m_player1->setPositionX(net->m_remoteX);
+        this->m_player1->setPositionY(net->m_remoteY);
+        this->m_player1->setRotation(net->m_remoteRot);
+        net->m_hasRemotePos = false; // clear AFTER teleport
+      }
       refreshModeLabel();
     }
 
@@ -861,16 +868,38 @@ class $modify(SwapPlayLayer, PlayLayer) {
 // ═════════════════════════════════════════
 
 class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
+  // Hook update to set spectator position BEFORE and AFTER physics
+  // This makes the camera follow the remote player
+  void update(float dt) {
+    auto net = NetworkManager::get();
+    bool spectating = net->isConnected() && net->m_inLevel &&
+                      !net->isActivePlayer() && net->m_hasRemotePos;
+
+    // BEFORE physics: put spectator at remote position
+    if (spectating && this->m_player1) {
+      this->m_player1->setPositionX(net->m_remoteX);
+      this->m_player1->setPositionY(net->m_remoteY);
+      this->m_player1->setRotation(net->m_remoteRot);
+    }
+
+    GJBaseGameLayer::update(dt);
+
+    // AFTER physics: override back (physics moved us)
+    if (spectating && this->m_player1) {
+      this->m_player1->setPositionX(net->m_remoteX);
+      this->m_player1->setPositionY(net->m_remoteY);
+      this->m_player1->setRotation(net->m_remoteRot);
+    }
+  }
+
   void handleButton(bool push, int button, bool player1) {
     auto net = NetworkManager::get();
     if (!net->isConnected() || !net->m_inLevel) {
       GJBaseGameLayer::handleButton(push, button, player1);
       return;
     }
-    // Active player: normal input
     if (net->isActivePlayer()) {
       GJBaseGameLayer::handleButton(push, button, player1);
     }
-    // Spectator: ALL input blocked (cube is teleported by position sync)
   }
 };
