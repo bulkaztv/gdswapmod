@@ -14,7 +14,6 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/ui/Popup.hpp>
 
-
 using namespace geode::prelude;
 
 // ─────────────────────────────────────────
@@ -350,11 +349,18 @@ protected:
     ipLabel->setPosition(ccp(size.width / 2, size.height - 55));
     m_mainLayer->addChild(ipLabel);
 
-    // IP text input
+    // IP text input with visible background
+    auto inputBg = CCScale9Sprite::create("square02_small.png");
+    inputBg->setContentSize({220.f, 30.f});
+    inputBg->setPosition(ccp(size.width / 2, size.height - 80));
+    inputBg->setOpacity(100);
+    m_mainLayer->addChild(inputBg);
+
     m_ipInput =
         CCTextInputNode::create(200.f, 30.f, "np. 26.0.0.1", "bigFont.fnt");
     m_ipInput->setPosition(ccp(size.width / 2, size.height - 80));
     m_ipInput->setMaxLabelScale(0.55f);
+    m_ipInput->setAllowedChars("0123456789.");
     m_mainLayer->addChild(m_ipInput);
 
     // Status label
