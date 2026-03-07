@@ -21,7 +21,6 @@
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
 
-
 using namespace geode::prelude;
 
 // ── Winsock ──
@@ -46,7 +45,6 @@ using namespace geode::prelude;
 #include <random>
 #include <sstream>
 #include <thread>
-
 
 static constexpr int SWAP_PORT = 5055;
 
@@ -399,7 +397,8 @@ private:
         m_peerKnown = true;
         m_state = State::Connected;
         send("WELCOME");
-        setStatus("Kolega polaczony!", 2);
+        m_statusMsg = "Kolega polaczony!";
+        m_statusColor = 2;
         log::info("HOST: peer connected");
         continue;
       }
@@ -408,7 +407,8 @@ private:
       if (!m_isHost && m_state == State::Connecting && msg == "WELCOME") {
         std::lock_guard<std::mutex> lk(m_mtx);
         m_state = State::Connected;
-        setStatus("Polaczono z hostem!", 2);
+        m_statusMsg = "Polaczono z hostem!";
+        m_statusColor = 2;
         log::info("JOINER: connected!");
         continue;
       }
