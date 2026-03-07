@@ -16,7 +16,6 @@
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
 
-
 using namespace geode::prelude;
 
 #ifdef _WIN32
@@ -40,7 +39,6 @@ using namespace geode::prelude;
 #include <random>
 #include <sstream>
 #include <thread>
-
 
 static constexpr int SWAP_PORT = 5055;
 
@@ -733,8 +731,8 @@ class $modify(SwapPlayLayer, PlayLayer) {
     PlayLayer::onQuit();
   }
 
-  void update(float p0) {
-    PlayLayer::update(p0);
+  void postUpdate(float p0) {
+    PlayLayer::postUpdate(p0);
 
     auto net = NetworkManager::get();
     if (!net->isConnected() || !m_fields->m_active)
