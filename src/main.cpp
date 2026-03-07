@@ -395,9 +395,6 @@ public:
   // ─── Position + input sending ───
 
   void sendPos(float x, float y, float rot) {
-    m_syncFrame++;
-    if (m_syncFrame % 2 != 0)
-      return;
     char buf[64];
     snprintf(buf, sizeof(buf), "P %d %d %d", (int)x, (int)y, (int)rot);
     sendUDP(buf);
@@ -734,60 +731,32 @@ class $modify(SwapPlayLayer, PlayLayer) {
   void postUpdate(float p0) {
     auto net = NetworkManager::get();
 
-    // ══════════════════════════════════
-    // SPECTATING: set position BEFORE postUpdate
-    // so GD's camera calculation uses remote position
-    // ══════════════════════════════════
+    // BEFORE original postUpdate: sync spectator position so camera follows
     if (net->isConnected() && m_fields->m_active && !net->isActivePlayer()) {
       if (net->m_hasRemotePos && this->m_player1) {
         this->m_player1->setPositionX(net->m_remoteX);
         this->m_player1->setPositionY(net->m_remoteY);
         this->m_player1->setRotation(net->m_remoteRot);
-        this->m_player1->setVisible(false); // hide spectator's cube
-      }
-      // Apply remote inputs BEFORE physics
-      if (this->m_player1) {
-        if (net->m_remoteJump) {
-          this->m_player1->pushButton(PlayerButton::Jump);
-          net->m_remoteJump = false;
-        }
-        if (net->m_remoteRelease) {
-          this->m_player1->releaseButton(PlayerButton::Jump);
-          net->m_remoteRelease = false;
-        }
-      }
-      if (this->m_player2) {
-        if (net->m_remoteP2Jump) {
-          this->m_player2->pushButton(PlayerButton::Jump);
-          net->m_remoteP2Jump = false;
-        }
-        if (net->m_remoteP2Release) {
-          this->m_player2->releaseButton(PlayerButton::Jump);
-          net->m_remoteP2Release = false;
-        }
       }
     }
 
-    // Call original postUpdate (runs camera, effects, etc)
     PlayLayer::postUpdate(p0);
 
     if (!net->isConnected() || !m_fields->m_active)
       return;
 
-    // ── Swap timer (host only) ──
+    // ── Swap timer (host) ──
     net->updateSwapTimer(p0);
 
-    // ── Debug display ──
+    // ── Debug ──
     if (m_fields->m_dbgLbl) {
-      std::string dbg;
-      if (net->m_isHost) {
-        dbg =
-            fmt::format("{:.0f}s P{}", net->getTimeLeft(), net->m_activePlayer);
-      } else {
-        dbg = fmt::format("P{} {}", net->m_activePlayer,
-                          net->isActivePlayer() ? "GRA" : "PAT");
-      }
-      m_fields->m_dbgLbl->setString(dbg.c_str());
+      std::string d;
+      if (net->m_isHost)
+        d = fmt::format("{:.0f}s P{}", net->getTimeLeft(), net->m_activePlayer);
+      else
+        d = fmt::format("P{} {}", net->m_activePlayer,
+                        net->isActivePlayer() ? "GRA" : "PAT");
+      m_fields->m_dbgLbl->setString(d.c_str());
     }
 
     // ── Swap event ──
@@ -796,20 +765,13 @@ class $modify(SwapPlayLayer, PlayLayer) {
       m_fields->m_displayTmr = 2.5f;
       m_fields->m_lastWarn = 0;
 
-      if (net->isActivePlayer()) {
-        // I'M NOW PLAYING — show player, teleport to where the other player was
-        if (this->m_player1) {
-          this->m_player1->setVisible(true);
-          if (net->m_hasRemotePos) {
-            this->m_player1->setPositionX(net->m_remoteX);
-            this->m_player1->setPositionY(net->m_remoteY);
-            this->m_player1->setRotation(net->m_remoteRot);
-          }
-        }
-      } else {
-        // I'M NOW SPECTATING — hide player
-        if (this->m_player1) {
-          this->m_player1->setVisible(false);
+      if (net->isActivePlayer() && this->m_player1) {
+        // Now playing: show cube, teleport to where the other player was
+        this->m_player1->setVisible(true);
+        if (net->m_hasRemotePos) {
+          this->m_player1->setPositionX(net->m_remoteX);
+          this->m_player1->setPositionY(net->m_remoteY);
+          this->m_player1->setRotation(net->m_remoteRot);
         }
       }
 
@@ -826,7 +788,7 @@ class $modify(SwapPlayLayer, PlayLayer) {
       refreshModeLabel();
     }
 
-    // ── Warning countdown ──
+    // ── Warning ──
     if (net->m_warningSeconds > 0 &&
         net->m_warningSeconds != m_fields->m_lastWarn) {
       m_fields->m_lastWarn = net->m_warningSeconds;
@@ -840,34 +802,45 @@ class $modify(SwapPlayLayer, PlayLayer) {
       }
     }
 
-    // ── Fade out notification ──
+    // ── Fade out ──
     if (m_fields->m_displayTmr > 0.f) {
       m_fields->m_displayTmr -= p0;
-      if (m_fields->m_displayTmr <= 0.f && net->m_warningSeconds == 0) {
-        if (m_fields->m_swapLbl) {
-          m_fields->m_swapLbl->stopAllActions();
-          m_fields->m_swapLbl->runAction(CCFadeOut::create(0.5f));
-        }
+      if (m_fields->m_displayTmr <= 0.f && net->m_warningSeconds == 0 &&
+          m_fields->m_swapLbl) {
+        m_fields->m_swapLbl->stopAllActions();
+        m_fields->m_swapLbl->runAction(CCFadeOut::create(0.5f));
       }
     }
 
-    // ══════════════════════════════════
-    // ACTIVE PLAYER → send position
-    // ══════════════════════════════════
+    // ══════════════════════════════════════════
+    // ACTIVE: visible, send position every frame
+    // ══════════════════════════════════════════
     if (net->isActivePlayer() && this->m_player1) {
-      this->m_player1->setVisible(true); // ensure visible when playing
+      this->m_player1->setVisible(true);
       auto pos = this->m_player1->getPosition();
       net->sendPos(pos.x, pos.y, this->m_player1->getRotation());
     }
 
-    // ══════════════════════════════════
-    // SPECTATING → keep position synced after postUpdate
-    // ══════════════════════════════════
-    if (!net->isActivePlayer() && net->m_hasRemotePos && this->m_player1) {
-      this->m_player1->setPositionX(net->m_remoteX);
-      this->m_player1->setPositionY(net->m_remoteY);
-      this->m_player1->setRotation(net->m_remoteRot);
+    // ══════════════════════════════════════════
+    // SPECTATING: invisible, sync position
+    // ══════════════════════════════════════════
+    if (!net->isActivePlayer() && this->m_player1) {
+      this->m_player1->setVisible(false);
+      if (net->m_hasRemotePos) {
+        this->m_player1->setPositionX(net->m_remoteX);
+        this->m_player1->setPositionY(net->m_remoteY);
+        this->m_player1->setRotation(net->m_remoteRot);
+      }
     }
+  }
+
+  // PREVENT spectator from dying (death = respawn = desync)
+  void destroyPlayer(PlayerObject *player, GameObject *obj) {
+    auto net = NetworkManager::get();
+    if (net->isConnected() && !net->isActivePlayer()) {
+      return; // spectator can't die
+    }
+    PlayLayer::destroyPlayer(player, obj);
   }
 
   void refreshModeLabel() {
@@ -885,20 +858,16 @@ class $modify(SwapPlayLayer, PlayLayer) {
 };
 
 // ═════════════════════════════════════════
-// Input Hook — block inactive player
+// Input Hook
 // ═════════════════════════════════════════
 
 class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
   void handleButton(bool push, int button, bool player1) {
     auto net = NetworkManager::get();
-
-    // Not in swap session → normal input
     if (!net->isConnected() || !net->m_inLevel) {
       GJBaseGameLayer::handleButton(push, button, player1);
       return;
     }
-
-    // Active player → allow + relay to peer
     if (net->isActivePlayer()) {
       GJBaseGameLayer::handleButton(push, button, player1);
       if (player1) {
@@ -907,6 +876,5 @@ class $modify(SwapBaseGameLayer, GJBaseGameLayer) {
         push ? net->sendP2Jump() : net->sendP2Release();
       }
     }
-    // Inactive → BLOCK all local input
   }
 };
